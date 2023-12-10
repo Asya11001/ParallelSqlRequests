@@ -1,4 +1,4 @@
-﻿
+﻿/*
 using System;
 using System.Data;
 using System.Data.SqlClient;
@@ -7,7 +7,7 @@ class Program
 {
     static void Main(string[] args)
     {
-        string connectionString = "Server=DESKTOP-VU5HLAS\\SQLEXPRESS;Database=course_db;Integrated Security=True;";
+        string connectionString = "Server=DESKTOP-B3JFO7O;Database=course_db;Integrated Security=True;";
 
         try
         {
@@ -16,7 +16,7 @@ class Program
                 connection.Open();
 
                 // SQL query to select all rows from the computer_hardware table
-                string query = "SELECT * FROM computer_hardware";
+                string query = "SELECT TOP (1) * FROM computer_hardware";
 
                 using (SqlCommand command = new SqlCommand(query, connection))
                 {
@@ -53,6 +53,109 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine("Error: " + ex.Message);
+        }
+    }
+}*/
+
+using System;
+using System.Diagnostics;
+using System.Linq;
+using MPI;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using MySql.Data.MySqlClient;
+
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+[Table("computer_hardware")] // Specify the actual table name
+public class ComputerHardware
+{
+    [Key]
+    public int Id { get; set; }
+
+    [Required]
+    [Column("cpu_name")]
+    public string CPU { get; set; }
+
+    [Required]
+    [Column("gpu_name")]
+    public string GPU { get; set; }
+
+    [Required]
+    [Column("ram_name")]
+    public string RAM { get; set; }
+
+    [Required]
+    [Column("motherboard_name")]
+    public string Motherboard { get; set; }
+
+    [Required]
+    [Column("psu_name")]
+    public string PSU { get; set; }
+}
+
+
+public class ComputerHardwares
+{
+    public int Id { get; set; }
+    public string CPU { get; set; }
+    public string GPU { get; set; }
+    public string RAM { get; set; }
+    public string Motherboard { get; set; }
+    public string PSU { get; set; } 
+}
+
+public class SampleDbContext : DbContext
+{
+    public DbSet<ComputerHardware> ComputerHardwares { get; set; }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        string connectionString = "Server=DESKTOP-B3JFO7O;Database=course_db;Integrated Security=True;";
+        optionsBuilder.UseSqlServer(connectionString);
+    }
+}
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        Stopwatch stopwatch = new Stopwatch();
+
+        using (new MPI.Environment(ref args))
+        {
+            Intracommunicator comm = MPI.Communicator.world;
+
+            try
+            {
+                if (comm.Rank == 0)
+                {
+                    Console.WriteLine("Choose MPI Rank 0 operation (1-7): ");
+                    int selectedQuery = int.Parse(Console.ReadLine());
+                    stopwatch.Start();
+
+                    using (var dbContext = new SampleDbContext())
+                    {
+                        // Assuming ComputerHardware is your entity representing the 'computer_hardware' table
+                        var result = dbContext.ComputerHardwares.Take(1).ToList();
+
+                        // Process and print the results here
+                        foreach (var hardware in result)
+                        {
+                            Console.WriteLine($"ID: {hardware.Id}, CPU: {hardware.CPU}, GPU: {hardware.GPU}, RAM: {hardware.RAM}, Motherboard: {hardware.Motherboard}, PSU: {hardware.PSU}");
+                        }
+
+                        stopwatch.Stop();
+                        Console.WriteLine($"Program executed in {stopwatch.ElapsedMilliseconds} milliseconds.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error: " + ex.Message);
+            }
         }
     }
 }
