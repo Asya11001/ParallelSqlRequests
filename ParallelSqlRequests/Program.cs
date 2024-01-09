@@ -1,63 +1,4 @@
-﻿/*
-using System;
-using System.Data;
-using System.Data.SqlClient;
-
-class Program
-{
-    static void Main(string[] args)
-    {
-        string connectionString = "Server=DESKTOP-B3JFO7O;Database=course_db;Integrated Security=True;";
-
-        try
-        {
-            using (SqlConnection connection = new SqlConnection(connectionString))
-            {
-                connection.Open();
-
-                // SQL query to select all rows from the computer_hardware table
-                string query = "SELECT TOP (1) * FROM computer_hardware";
-
-                using (SqlCommand command = new SqlCommand(query, connection))
-                {
-                    using (SqlDataReader reader = command.ExecuteReader())
-                    {
-                        // Check if there are rows returned
-                        if (reader.HasRows)
-                        {
-                            // Iterate through the rows and access the data
-                            while (reader.Read())
-                            {
-                                // Access columns by name or index
-                                int id = reader.GetInt32(reader.GetOrdinal("id"));
-                                string CPU = reader.GetString(reader.GetOrdinal("cpu_name"));
-                                string GPU = reader.GetString(reader.GetOrdinal("gpu_name"));
-                                string RAM = reader.GetString(reader.GetOrdinal("ram_name"));
-                                string Motherboard = reader.GetString(reader.GetOrdinal("motherboard_name"));
-                                string PSU = reader.GetString(reader.GetOrdinal("psu_name"));
-
-                                // Output the data (you can do whatever you need with it)
-                                Console.WriteLine($"ID: {id}, CPU: {CPU}, GPU: {GPU}, RAM: {RAM}, Motherboard: {Motherboard}, PSU: {PSU}");
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine("No rows found.");
-                        }
-                    }
-                }
-
-                connection.Close();
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Error: " + ex.Message);
-        }
-    }
-}*/
-
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Linq;
 using MPI;
@@ -69,7 +10,22 @@ using MySql.Data.MySqlClient;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
+using Newtonsoft.Json;
+public static class JsonSerializerHelper
+{
+    public static string SerializeObject<T>(T obj)
+    {
+        return JsonConvert.SerializeObject(obj);
+    }
+
+    public static T DeserializeObject<T>(string json)
+    {
+        return JsonConvert.DeserializeObject<T>(json);
+    }
+}
+
 [Table("computer_hardware")] // Specify the actual table name
+[Serializable]
 public class ComputerHardware
 {
     [Key]
@@ -127,28 +83,125 @@ class Program
         using (new MPI.Environment(ref args))
         {
             Intracommunicator comm = MPI.Communicator.world;
+            if (comm.Size < 2)
+            {
+                return;
+            }
 
             try
             {
-                if (comm.Rank == 0)
+                using (var dbContext = new SampleDbContext())
                 {
-                    Console.WriteLine("Choose MPI Rank 0 operation (1-7): ");
-                    int selectedQuery = int.Parse(Console.ReadLine());
-                    stopwatch.Start();
-
-                    using (var dbContext = new SampleDbContext())
+                    // Only rank 0 creates tables
+                    if (comm.Rank == 0)
                     {
-                        // Assuming ComputerHardware is your entity representing the 'computer_hardware' table
-                        var result = dbContext.ComputerHardwares.Take(1).ToList();
+                        for (int i = 1; i < comm.Size; i++)
+                        {
+                            var tableName = $"computer_hardware_{i}";
+
+                            // Check if the table exists before creating it
+                            var tableExists = dbContext.Database.ExecuteSqlRaw($"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}'") > 0;
+
+                            if (!tableExists)
+                            {
+                                // Use a transaction to ensure atomic table creation
+                                using (var transaction = dbContext.Database.BeginTransaction())
+                                {
+                                    try
+                                    {
+                                        // Create the table if it doesn't exist
+                                        dbContext.Database.ExecuteSqlRaw($"SELECT * INTO {tableName} FROM computer_hardware WHERE ABS(CAST(Id AS INT)) % {comm.Size} = ({comm.Rank} - 1 + {comm.Size}) % {comm.Size}");
+                                        transaction.Commit();
+                                    }
+                                    catch (Exception)
+                                    {
+                                        transaction.Rollback();
+                                    }
+                                }
+                            }
+                        }
+
+                        comm.Barrier(); // Ensure all processes wait for table creation
+                    }
+                    else
+                    {
+                        comm.Barrier(); // Other processes wait for table creation
+                    }
+
+                    // Each process performs the query on its own table
+                    var tableNameForQuery = $"computer_hardware_{comm.Rank}";
+
+                    List<ComputerHardware> result = null;
+
+                    // Check if the table exists before querying it
+                    var queryTableExists = dbContext.Database.ExecuteSqlRaw($"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableNameForQuery}'") > 0;
+
+                    if (queryTableExists)
+                    {
+                        result = dbContext.Set<ComputerHardware>().FromSqlRaw($"SELECT * FROM {tableNameForQuery}").ToList();
 
                         // Process and print the results here
                         foreach (var hardware in result)
                         {
-                            Console.WriteLine($"ID: {hardware.Id}, CPU: {hardware.CPU}, GPU: {hardware.GPU}, RAM: {hardware.RAM}, Motherboard: {hardware.Motherboard}, PSU: {hardware.PSU}");
+                            Console.WriteLine($"Process {comm.Rank}: ID: {hardware.Id}, CPU: {hardware.CPU}, GPU: {hardware.GPU}, RAM: {hardware.RAM}, Motherboard: {hardware.Motherboard}, PSU: {hardware.PSU}");
+                        }
+                    }
+
+                    // Wait for all processes to complete the query
+                    comm.Barrier();
+
+                    if (comm.Rank == 0)
+                    {
+                        stopwatch.Start();
+                    }
+
+                    // Main process gathers results from all processes
+                    List<ComputerHardware>[] allResults = comm.Gather(result, 0);
+
+                    // Main process prints the gathered results
+                    if (comm.Rank == 0)
+                    {
+                        // Process and print the gathered results
+                        foreach (var processResults in allResults)
+                        {
+                            if (processResults != null)
+                            {
+                                foreach (var hardware in processResults)
+                                {
+                                    Console.WriteLine($"Gathered Result: ID: {hardware.Id}, CPU: {hardware.CPU}, GPU: {hardware.GPU}, RAM: {hardware.RAM}, Motherboard: {hardware.Motherboard}, PSU: {hardware.PSU}");
+                                }
+                            }
                         }
 
                         stopwatch.Stop();
                         Console.WriteLine($"Program executed in {stopwatch.ElapsedMilliseconds} milliseconds.");
+                    }
+
+                    // Each process drops its own table
+                    for (int i = 1; i < comm.Size; i++)
+                    {
+                        var tableNameForDeletion = $"computer_hardware_{i}";
+
+                        // Check if the table exists before dropping it
+                        var tableExists = dbContext.Database.ExecuteSqlRaw($"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableNameForDeletion}'") > 0;
+
+                        if (tableExists)
+                        {
+                            // Use a transaction to ensure atomic table deletion
+                            using (var transaction = dbContext.Database.BeginTransaction())
+                            {
+                                try
+                                {
+                                    // Drop the table if it exists
+                                    dbContext.Database.ExecuteSqlRaw($"DROP TABLE {tableNameForDeletion}");
+                                    transaction.Commit();
+                                }
+                                catch (Exception)
+                                {
+                                    transaction.Rollback();
+                                }
+                            }
+                        }
                     }
                 }
             }
