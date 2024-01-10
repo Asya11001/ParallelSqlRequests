@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using MPI;
 using Microsoft.EntityFrameworkCore;
@@ -83,68 +82,6 @@ class Program
             }
         }
     }
-    static void SendData(int rank, int numProcesses, List<ComputerHardware> data)
-    {
-        if (rank != 0)
-        {
-            string serializedData = JsonSerializerHelper.SerializeObject(data);
-
-            Communicator.world.Send(serializedData, 0, 0);
-        }
-    }
-
-    static List<ComputerHardware> ReceiveData(int numProcesses)
-    {
-        List<ComputerHardware> receivedData = new List<ComputerHardware>();
-
-        for (int i = 1; i < numProcesses; i++)
-        {
-            string serializedData = Communicator.world.Receive<string>(i, 0);
-
-            List<ComputerHardware> deserializedData = JsonSerializerHelper.DeserializeObject<List<ComputerHardware>>(serializedData);
-
-            receivedData.AddRange(deserializedData);
-        }
-
-        return receivedData;
-    }
-
-    static void GatherResults(int rank, int numProcesses, List<long> processTimes)
-    {
-        using (var dbContext = new SampleDbContext())
-        {
-            if (rank == 0)
-            {
-                List<(int ProcessId, int NumRecords, List<ComputerHardware> Results)> gatheredResults =
-                    new List<(int, int, List<ComputerHardware>)>();
-
-                for (int i = 0; i < numProcesses - 1; i++)
-                {
-                    Stopwatch stopwatch = new Stopwatch();
-                    stopwatch.Start();
-
-                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM computer_hardware_{i}")
-                        .ToList();
-                    gatheredResults.Add((i + 1, result.Count, result));
-
-                    SendData(rank, numProcesses, result);
-
-                    stopwatch.Stop();
-
-                    processTimes.Add(stopwatch.ElapsedMilliseconds);
-
-                    Console.WriteLine($"Process {i + 1} has finished its work.");
-                }
-                Console.WriteLine("Gathered Results:");
-                foreach (var result in gatheredResults)
-                {
-                    Console.WriteLine($"From Process {result.ProcessId}: {result.NumRecords} records, Time taken: {processTimes[result.ProcessId - 1]} milliseconds");
-                }
-            }
-        }
-    }
-
-
 
     static void DeleteTables(int rank, int numProcesses)
     {
@@ -160,86 +97,62 @@ class Program
         }
     }
 
-
-    static void SingleRequestToMainTable()
+    static List<string> GetLocalData(int rank)
     {
         using (var dbContext = new SampleDbContext())
         {
-            Stopwatch stopwatch = new Stopwatch();
-            stopwatch.Start();
+            var tableName = $"computer_hardware_{rank}";
+            var localData = dbContext.ComputerHardwares
+                .FromSqlRaw($"SELECT * FROM {tableName}")
+                .Select(hardware => JsonSerializerHelper.SerializeObject(hardware))
+                .ToList();
 
-            var result = dbContext.ComputerHardwares.ToList();
-
-            stopwatch.Stop();
-
-            Console.WriteLine("Single Request to Main Table:");
-            Console.WriteLine($"Number of records: {result.Count}");
-            // foreach (var hardware in result)
-            // {
-            //     Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
-            // }
-
-            Console.WriteLine(
-                $"Time taken for single request to main table: {stopwatch.ElapsedMilliseconds} milliseconds");
+            return localData;
         }
     }
-// Modify ComparePerformance method to receive data
-    static void ComparePerformance(int rank, int numProcesses)
-    {
-        if (rank == 0)
-        {
-            Console.WriteLine($"Comparing Performance for {numProcesses - 1} Slave Processes:");
-        }
-
-        List<long> processTimes = new List<long>();
-
-        GatherResults(rank, numProcesses, processTimes);
-
-        Communicator.world.Barrier();
-
-        if (rank == 0)
-        {
-            // Receive data from all slave processes
-            List<ComputerHardware> receivedData = ReceiveData(numProcesses);
-
-            // Display the received data or perform further processing
-            Console.WriteLine("Received Data:");
-            foreach (var hardware in receivedData)
-            {
-                Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
-            }
-
-            // Perform any additional processing with the received data
-        }
-
-        Communicator.world.Barrier();
-
-        // SingleRequestToMainTable();
-    }
-    
     static void Main(string[] args)
     {
         using (new MPI.Environment(ref args))
         {
             int rank = Communicator.world.Rank;
             int numProcesses = Communicator.world.Size;
-            if (numProcesses < 2)
-            {
-                Console.WriteLine("Provide at least 2 processes to work with");
-                return;
-            }
-
-            Communicator.world.Barrier();
 
             CreateTable(rank, numProcesses);
 
-            Communicator.world.Barrier();
+            if (rank != 0)
+            {
+                // Non-zero ranks send their local data to rank 0
+                var localData = GetLocalData(rank);
+                string serializedData = string.Join(",", localData);
+                Console.WriteLine($"Process {rank}/{numProcesses} sending data: {serializedData}");
+                Communicator.world.Send(serializedData, 0, 0);
+                Console.WriteLine($"Process {rank}/{numProcesses} sent data");
+            }
+            else
+            {
+                // Rank 0 gathers data from other processes
+                var gatheredData = new List<string>();
+                for (int i = 1; i < numProcesses; i++)
+                {
+                    Console.WriteLine($"Process {rank}/{numProcesses} receiving data from process {i}/{numProcesses}");
+                    string receivedData = Communicator.world.Receive<string>(i, 0);
+                    Console.WriteLine($"Process {rank}/{numProcesses} received data from process {i}/{numProcesses}: {receivedData}");
+                    gatheredData.Add(receivedData);
+                }
 
-            ComparePerformance(rank, numProcesses);
-            
-            Communicator.world.Barrier();
+                Console.WriteLine($"Process {rank}/{numProcesses} received a lot of data as the result!");
 
+                // Print the gathered data
+                foreach (var data in gatheredData)
+                {
+                    Console.WriteLine(data);
+                }
+
+            }
+
+            Communicator.world.Barrier(); // Synchronize all processes before exiting
             DeleteTables(rank, numProcesses);
         }
     }
+
 }
