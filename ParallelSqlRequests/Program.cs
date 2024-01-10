@@ -87,13 +87,15 @@ class Program
                 Stopwatch stopwatch = new Stopwatch();
                 stopwatch.Start();
 
-                List<(int ProcessId, List<ComputerHardware> Results)> gatheredResults = new List<(int, List<ComputerHardware>)>();
+                List<(int ProcessId, int NumRecords, List<ComputerHardware> Results)> gatheredResults =
+                    new List<(int, int, List<ComputerHardware>)>();
 
                 // Gather results from each slave process
                 for (int i = 0; i < numProcesses - 1; i++)
                 {
-                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM computer_hardware_{i}").ToList();
-                    gatheredResults.Add((i + 1, result));
+                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM computer_hardware_{i}")
+                        .ToList();
+                    gatheredResults.Add((i + 1, result.Count, result));
                 }
 
                 stopwatch.Stop();
@@ -102,14 +104,15 @@ class Program
                 Console.WriteLine("Gathered Results:");
                 foreach (var result in gatheredResults)
                 {
-                    Console.WriteLine($"From Process {result.ProcessId}:");
-                    foreach (var hardware in result.Results)
-                    {
-                        Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
-                    }
+                    Console.WriteLine($"From Process {result.ProcessId}: {result.NumRecords} records");
+                    // foreach (var hardware in result.Results)
+                    // {
+                    //     Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
+                    // }
                 }
 
-                Console.WriteLine($"Time taken for data selection by slave processes: {stopwatch.ElapsedMilliseconds} milliseconds");
+                Console.WriteLine(
+                    $"Time taken for data selection by slave processes: {stopwatch.ElapsedMilliseconds} milliseconds");
             }
         }
     }
@@ -130,18 +133,64 @@ class Program
         }
     }
 
+
+    static void SingleRequestToMainTable()
+    {
+        using (var dbContext = new SampleDbContext())
+        {
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
+
+            // Single request to the main table
+            var result = dbContext.ComputerHardwares.ToList();
+
+            stopwatch.Stop();
+
+            // Process and display results
+            Console.WriteLine("Single Request to Main Table:");
+            Console.WriteLine($"Number of records: {result.Count}");
+            // foreach (var hardware in result)
+            // {
+            //     Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
+            // }
+
+            Console.WriteLine(
+                $"Time taken for single request to main table: {stopwatch.ElapsedMilliseconds} milliseconds");
+        }
+    }
+
+    static void ComparePerformance(int rank, int numProcesses)
+    {
+        if (rank == 0)
+        {
+            Console.WriteLine($"Comparing Performance for {numProcesses - 1} Slave Processes:");
+        }
+
+        GatherResults(rank, numProcesses);
+
+        // Ensure that only the root process prints the single request results
+        Communicator.world.Barrier(); // Synchronize processes
+        if (rank == 0)
+        {
+            SingleRequestToMainTable();
+        }
+    }
+
     static void Main(string[] args)
     {
         using (new MPI.Environment(ref args))
         {
             int rank = Communicator.world.Rank;
             int numProcesses = Communicator.world.Size;
+            if (numProcesses < 2)
+            {
+                Console.WriteLine("Provide at least 2 processes to work with");
+                return;
+            }
 
             CreateTable(rank, numProcesses);
 
-            // Perform other computation or data processing tasks here...
-
-            GatherResults(rank, numProcesses);
+            ComparePerformance(rank, numProcesses);
 
             DeleteTables(rank, numProcesses);
         }
