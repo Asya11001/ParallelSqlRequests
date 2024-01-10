@@ -78,31 +78,42 @@ class Program
         }
     }
 
-
     static void GatherResults(int rank, int numProcesses)
     {
         using (var dbContext = new SampleDbContext())
         {
             if (rank == 0)
             {
-                List<ComputerHardware> gatheredResults = new List<ComputerHardware>();
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+
+                List<(int ProcessId, List<ComputerHardware> Results)> gatheredResults = new List<(int, List<ComputerHardware>)>();
 
                 // Gather results from each slave process
-                for (int i = 1; i < numProcesses; i++)
+                for (int i = 0; i < numProcesses - 1; i++)
                 {
-                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM ComputerHardware_{i}").ToList();
-                    gatheredResults.AddRange(result);
+                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM computer_hardware_{i}").ToList();
+                    gatheredResults.Add((i + 1, result));
                 }
 
-                // Process gathered results as needed
+                stopwatch.Stop();
+
+                // Process gathered results and display information
                 Console.WriteLine("Gathered Results:");
-                foreach (var hardware in gatheredResults)
+                foreach (var result in gatheredResults)
                 {
-                    Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
+                    Console.WriteLine($"From Process {result.ProcessId}:");
+                    foreach (var hardware in result.Results)
+                    {
+                        Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
+                    }
                 }
+
+                Console.WriteLine($"Time taken for data selection by slave processes: {stopwatch.ElapsedMilliseconds} milliseconds");
             }
         }
     }
+
 
     static void DeleteTables(int rank, int numProcesses)
     {
@@ -113,7 +124,7 @@ class Program
                 for (int i = 0; i < numProcesses - 1; i++)
                 {
                     // Delete tables for each slave process
-                    dbContext.Database.ExecuteSqlRaw($"DROP TABLE IF EXISTS ComputerHardware_{i}");
+                    dbContext.Database.ExecuteSqlRaw($"DROP TABLE IF EXISTS computer_hardware_{i}");
                 }
             }
         }
@@ -130,9 +141,9 @@ class Program
 
             // Perform other computation or data processing tasks here...
 
-            // GatherResults(rank, numProcesses);
+            GatherResults(rank, numProcesses);
 
-            // DeleteTables(rank, numProcesses);
+            DeleteTables(rank, numProcesses);
         }
     }
 }
