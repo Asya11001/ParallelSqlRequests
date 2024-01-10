@@ -22,31 +22,22 @@ public static class JsonSerializerHelper
     }
 }
 
-[Table("computer_hardware")] 
+[Table("computer_hardware")]
 public class ComputerHardware
 {
-    [Key]
-    public int Id { get; set; }
+    [Key] public int Id { get; set; }
 
-    [Required]
-    [Column("cpu_name")]
-    public string CPU { get; set; }
+    [Required] [Column("cpu_name")] public string CPU { get; set; }
 
-    [Required]
-    [Column("gpu_name")]
-    public string GPU { get; set; }
+    [Required] [Column("gpu_name")] public string GPU { get; set; }
 
-    [Required]
-    [Column("ram_name")]
-    public string RAM { get; set; }
+    [Required] [Column("ram_name")] public string RAM { get; set; }
 
     [Required]
     [Column("motherboard_name")]
     public string Motherboard { get; set; }
 
-    [Required]
-    [Column("psu_name")]
-    public string PSU { get; set; }
+    [Required] [Column("psu_name")] public string PSU { get; set; }
 }
 
 public class SampleDbContext : DbContext
@@ -62,59 +53,86 @@ public class SampleDbContext : DbContext
 
 class Program
 {
-    static void Main(string[] args)
+    static void CreateTable(int rank, int numProcesses)
     {
-        Stopwatch stopwatch = new Stopwatch();
-
-        using (new MPI.Environment(ref args))
+        using (var dbContext = new SampleDbContext())
         {
-            Intracommunicator comm = MPI.Communicator.world;
-            if (comm.Size < 2)
+            if (rank == 0)
             {
-                Console.WriteLine("Please run the program with at least 2 processes.");
-                return;
-            }
-
-            try
-            {
-                using (var dbContext = new SampleDbContext())
+                for (int i = 0; i < numProcesses - 1; i++)
                 {
-                    // Create the table if it doesn't exist
-                    dbContext.Database.EnsureCreated();
+                    // Check if the table exists
+                    bool tableExists = dbContext.Database.ExecuteSqlRaw(
+                        $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'computer_hardware_{i}'"
+                    ) > 0;
 
-                    // Wait for all processes to ensure table creation
-                    comm.Barrier();
-
-                    // Each process performs the query on the entire table
-                    List<ComputerHardware> result = dbContext.Set<ComputerHardware>().ToList();
-
-                    // Serialize the result
-                    var serializedResult = JsonSerializerHelper.SerializeObject(result);
-
-                    // Gather results to process in the root process
-                    string[] gatheredResults = comm.Gather(serializedResult, 0);
-
-                    if (comm.Rank == 0)
+                    if (!tableExists)
                     {
-                        // Process and print the gathered results
-                        foreach (var gatheredResult in gatheredResults)
-                        {
-                            var deserializedResult = JsonSerializerHelper.DeserializeObject<List<ComputerHardware>>(gatheredResult);
-                            foreach (var hardware in deserializedResult)
-                            {
-                                Console.WriteLine($"Gathered Result: ID: {hardware.Id}, CPU: {hardware.CPU}, GPU: {hardware.GPU}, RAM: {hardware.RAM}, Motherboard: {hardware.Motherboard}, PSU: {hardware.PSU}");
-                            }
-                        }
-
-                        stopwatch.Stop();
-                        Console.WriteLine($"Program executed in {stopwatch.ElapsedMilliseconds} milliseconds.");
+                        // Create the table and insert data based on the specified condition
+                        dbContext.Database.ExecuteSqlRaw(
+                            $"EXEC('SELECT * INTO computer_hardware_{i} FROM computer_hardware WHERE Id % {numProcesses - 1} = {i};')"
+                        );
                     }
                 }
             }
-            catch (Exception ex)
+        }
+    }
+
+
+    static void GatherResults(int rank, int numProcesses)
+    {
+        using (var dbContext = new SampleDbContext())
+        {
+            if (rank == 0)
             {
-                Console.WriteLine("Error: " + ex.Message);
+                List<ComputerHardware> gatheredResults = new List<ComputerHardware>();
+
+                // Gather results from each slave process
+                for (int i = 1; i < numProcesses; i++)
+                {
+                    var result = dbContext.ComputerHardwares.FromSqlRaw($"SELECT * FROM ComputerHardware_{i}").ToList();
+                    gatheredResults.AddRange(result);
+                }
+
+                // Process gathered results as needed
+                Console.WriteLine("Gathered Results:");
+                foreach (var hardware in gatheredResults)
+                {
+                    Console.WriteLine($"{hardware.Id}: {hardware.CPU}, {hardware.GPU}, {hardware.RAM}, {hardware.Motherboard}, {hardware.PSU}");
+                }
             }
+        }
+    }
+
+    static void DeleteTables(int rank, int numProcesses)
+    {
+        using (var dbContext = new SampleDbContext())
+        {
+            if (rank == 0)
+            {
+                for (int i = 0; i < numProcesses - 1; i++)
+                {
+                    // Delete tables for each slave process
+                    dbContext.Database.ExecuteSqlRaw($"DROP TABLE IF EXISTS ComputerHardware_{i}");
+                }
+            }
+        }
+    }
+
+    static void Main(string[] args)
+    {
+        using (new MPI.Environment(ref args))
+        {
+            int rank = Communicator.world.Rank;
+            int numProcesses = Communicator.world.Size;
+
+            CreateTable(rank, numProcesses);
+
+            // Perform other computation or data processing tasks here...
+
+            // GatherResults(rank, numProcesses);
+
+            // DeleteTables(rank, numProcesses);
         }
     }
 }
