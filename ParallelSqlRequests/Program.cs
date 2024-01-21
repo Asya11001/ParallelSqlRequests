@@ -314,7 +314,7 @@ static void Main(string[] args)
                                                   // timeLogger.GetMaxElapsedTime("SerializeLocalData") +
                     timeLogger.GetLogTime("CreateTables") +
                     timeLogger.GetLogTime("GatherData") +
-                                                  timeLogger.GetLogTime("DropAllTables") +
+                                                  timeLogger.GetLogTime("DropAllTablesBeforeWork") +
                                                   timeLogger.GetLogTime("DeserializeGatheredData");
             
                 Console.WriteLine($"One single request: {timeLogger.GetLogTime("MainTableRequest")}");
