@@ -22,19 +22,29 @@ public static class JsonSerializerHelper
 [Table("computer_hardware")]
 public class ComputerHardware
 {
-    [Key] public int Id { get; set; }
+    [Key]
+    [Column("computer_hardware_id")]
+    public int Id { get; set; }
 
-    [Required] [Column("cpu_name")] public string CPU { get; set; }
+    [Required]
+    [Column("cpu_name")]
+    public string CPU { get; set; }
 
-    [Required] [Column("gpu_name")] public string GPU { get; set; }
+    [Required]
+    [Column("gpu_name")]
+    public string GPU { get; set; }
 
-    [Required] [Column("ram_name")] public string RAM { get; set; }
+    [Required]
+    [Column("ram_name")]
+    public string RAM { get; set; }
 
     [Required]
     [Column("motherboard_name")]
     public string Motherboard { get; set; }
 
-    [Required] [Column("psu_name")] public string PSU { get; set; }
+    [Required]
+    [Column("psu_name")]
+    public string PSU { get; set; }
 }
 
 public class SampleDbContext : DbContext
