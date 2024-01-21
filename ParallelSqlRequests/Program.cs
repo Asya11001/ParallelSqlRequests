@@ -155,6 +155,9 @@ class Program
             {
                     ExecuteMainTableRequest();
             }
+            
+            
+            Communicator.world.Barrier();
             if (rank != 0)
             {
                 // Non-zero ranks send their local data to rank 0
