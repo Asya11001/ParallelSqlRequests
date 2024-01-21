@@ -107,11 +107,10 @@ class Program
     }
 
 
-    static void CreateTable(int rank, int numProcesses)
+    static void CreateTables(int rank, int numProcesses)
     {
         if (rank == 0)
         {
-            timeLogger.StartTimer("TableCreation");
             using (var dbContext = new SampleDbContext())
             {
                 for (int i = 0; i < numProcesses - 1; i++)
@@ -123,15 +122,10 @@ class Program
                     if (!tableExists)
                     {
                         Console.WriteLine($"Creating table computer_hardware_{i}...");
-                        var stopwatch = Stopwatch.StartNew();
 
                         dbContext.Database.ExecuteSqlRaw(
                             $"EXEC('SELECT * INTO computer_hardware_{i} FROM computer_hardware WHERE computer_hardware_id % {numProcesses - 1} = {i};')"
                         );
-
-                        stopwatch.Stop();
-                        Console.WriteLine(
-                            $"Table computer_hardware_{i} created. Elapsed Time: {stopwatch.ElapsedMilliseconds} ms");
                     }
                     else
                     {
@@ -139,7 +133,6 @@ class Program
                     }
                 }
             }
-            timeLogger.StopTimer("TableCreation");
         }
     }
 
@@ -149,18 +142,10 @@ class Program
         {
             if (rank == 0)
             {
-                timeLogger.StartTimer("DropAllTables");
-                var stopwatch = Stopwatch.StartNew();
-
                 for (int i = 0; i < MAX_PROCESSES; i++)
                 {
                     dbContext.Database.ExecuteSqlRaw($"DROP TABLE IF EXISTS computer_hardware_{i}");
                 }
-
-                stopwatch.Stop();
-                Console.WriteLine(
-                    $"Dropped all tables. Elapsed Time: {stopwatch.ElapsedMilliseconds} ms");
-                timeLogger.StopTimer("DropAllTables");
             }
         }
     }
@@ -171,22 +156,16 @@ class Program
         using (var dbContext = new SampleDbContext())
         {
             var tableName = $"computer_hardware_{rank - 1}";
-            timeLogger.StartTimer("RetrieveData");
-            var stopwatchRetrieveData = Stopwatch.StartNew();
+            timeLogger.StartTimer($"GetLocalData");
             var localData = dbContext.ComputerHardwares
                 .FromSqlRaw($"SELECT * FROM {tableName}");
-            stopwatchRetrieveData.Stop();
+            timeLogger.StopTimer($"GetLocalData");
 
-            var stopwatchSerializeData = Stopwatch.StartNew();
+            timeLogger.StartTimer($"SerializedLocalData");
             var serializedLocalData =
                 localData.Select(hardware => JsonSerializerHelper.SerializeObject(hardware)).ToList();
-            stopwatchSerializeData.Stop();
-
-            Console.WriteLine(
-                $"Retrieved local data for process {rank}/{Communicator.world.Size}. Retrieve Time: {stopwatchRetrieveData.ElapsedMilliseconds} ms, Serialize time: {stopwatchSerializeData.ElapsedMilliseconds}");
-
-            timeLogger.StopTimer("RetrieveData");
-
+            timeLogger.StopTimer($"SerializedLocalData");
+            
             return serializedLocalData;
         }
     }
@@ -196,16 +175,11 @@ class Program
     {
         using (var dbContext = new SampleDbContext())
         {
-            timeLogger.StartTimer("MainTableRequest");
-            var stopwatch = Stopwatch.StartNew();
 
             Console.WriteLine($"[MAIN REQUEST]: Main table request executing...");
             var result = dbContext.ComputerHardwares.ToArray();
 
-            stopwatch.Stop();
 
-            Console.WriteLine(
-                $"[MAIN REQUEST]: Main table request executed. Elapsed Time: {stopwatch.ElapsedMilliseconds} ms");
             Console.WriteLine($"[MAIN REQUEST]: Main table consist of {result.Length} records");
 
             SaveToFile(result, "one_process_response.txt");
@@ -254,23 +228,31 @@ static void Main(string[] args)
 
             int rank = Communicator.world.Rank;
             int numProcesses = Communicator.world.Size;
-
+            
             Communicator.world.Barrier();
             if (rank == 0)
             {
-                DropAllTables(rank);
-            }
-
-            if (rank == 0)
-            {
-                CreateTable(rank, numProcesses);
-            }
-
-            Communicator.world.Barrier();
-            if (rank == 0)
-            {
+                timeLogger.StartTimer("MainTableRequest");
                 ExecuteMainTableRequest();
+                timeLogger.StopTimer("MainTableRequest");
             }
+
+            Communicator.world.Barrier();
+            if (rank == 0)
+            {
+                
+                timeLogger.StartTimer("DropAllTablesBeforeWork");
+                DropAllTables(rank);
+                timeLogger.StopTimer("DropAllTablesBeforeWork");
+            }
+
+            if (rank == 0)
+            {
+                timeLogger.StartTimer("CreateTables");
+                CreateTables(rank, numProcesses);
+                timeLogger.StopTimer("CreateTables");
+            }
+
 
             Communicator.world.Barrier();
             if (rank != 0)
@@ -278,13 +260,10 @@ static void Main(string[] args)
                 var localData = GetLocalData(rank);
                 string serializedData = string.Join(",", localData);
                 Console.WriteLine($"Process {rank}/{numProcesses} sending data...");
-                var stopwatch = Stopwatch.StartNew();
 
-                timeLogger.StartTimer($"{rank}SentData");
+                timeLogger.StartTimer($"SentData");
                 Communicator.world.Send(serializedData, 0, 0);
-                timeLogger.StopTimer($"{rank}SentData");
-                Console.WriteLine(
-                    $"Process {rank}/{numProcesses} sent data. Elapsed Time: {timeLogger.GetLogTime($"{rank}SentData")} ms");
+                timeLogger.StopTimer($"SentData");
             }
             else
             {
@@ -293,17 +272,19 @@ static void Main(string[] args)
                 timeLogger.StartTimer("GatherData");
                 for (int i = 1; i < numProcesses; i++)
                 {
+                    
+                    timeLogger.StartTimer("ReceiveData");
                     Console.WriteLine($"Process {rank}/{numProcesses} receiving data from process {i}/{numProcesses}");
                     gatheredData[i - 1] = Communicator.world.Receive<string>(i, 0);
                     Console.WriteLine($"Process {rank}/{numProcesses} received data from process {i}/{numProcesses}.");
+                    timeLogger.StopTimer("ReceiveData");
                 }
                 timeLogger.StopTimer("GatherData");
 
                 timeLogger.StartTimer("DeserializeGatheredData");
                 var deserializedData = DeserializeData(gatheredData);
                 timeLogger.StopTimer("DeserializeGatheredData");
-
-
+                
                 SaveToFile(deserializedData, "multi_process_response.txt");
             }
 
@@ -311,24 +292,35 @@ static void Main(string[] args)
 
             if (rank == 0)
             {
+                timeLogger.StartTimer("DropAllTablesAfterWork");
                 DropAllTables(rank);
+                timeLogger.StopTimer("DropAllTablesAfterWork");
             }
+
+            // Communicator.world.Barrier();
+
+            // if (rank == 0)
+            // {
+            //     CompareFiles();
+            // }
 
             Communicator.world.Barrier();
-
             if (rank == 0)
             {
-                CompareFiles();
-            }
-
-            Communicator.world.Barrier(); 
-
-            timeLogger.GetLogTime("MainTableRequest");
             
-            timeLogger.GetLogTime("TableCreation");
-            timeLogger.GetLogTime("RetrieveData");
-            timeLogger.GetLogTime("DropAllTables");
-            timeLogger.GetLogTime("DeserializeGatheredData");
+                long totalTParallelRequestsTime = 
+                    // timeLogger.GetMaxElapsedTime("ReceiveData") +
+                                                  // timeLogger.GetMaxElapsedTime("GetLocalData") +
+                                                  // timeLogger.GetMaxElapsedTime("SerializeLocalData") +
+                    timeLogger.GetLogTime("CreateTables") +
+                    timeLogger.GetLogTime("GatherData") +
+                                                  timeLogger.GetLogTime("DropAllTables") +
+                                                  timeLogger.GetLogTime("DeserializeGatheredData");
+            
+                Console.WriteLine($"One single request: {timeLogger.GetLogTime("MainTableRequest")}");
+                Console.WriteLine($"Parallel requests : {totalTParallelRequestsTime}");
+
+            }
         }
     }
 }
