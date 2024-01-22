@@ -317,7 +317,7 @@ static void Main(string[] args)
                                                   timeLogger.GetLogTime("DropAllTablesBeforeWork") +
                                                   timeLogger.GetLogTime("DeserializeGatheredData");
             
-                Console.WriteLine($"One single request: {timeLogger.GetLogTime("MainTableRequest")}");
+                Console.WriteLine($"Non-parallel request: {timeLogger.GetLogTime("MainTableRequest")}");
                 Console.WriteLine($"Parallel requests : {totalTParallelRequestsTime}");
 
             }
