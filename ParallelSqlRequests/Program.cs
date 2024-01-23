@@ -4,17 +4,76 @@ using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using MPI;
 using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+
+public class ObjectPool<T>
+{
+    private readonly Func<T> objectFactory;
+    private readonly Queue<T> objects;
+
+    public ObjectPool(Func<T> objectFactory, int initialSize)
+    {
+        this.objectFactory = objectFactory ?? throw new ArgumentNullException(nameof(objectFactory));
+        this.objects = new Queue<T>(initialSize);
+
+        for (int i = 0; i < initialSize; i++)
+        {
+            this.objects.Enqueue(this.objectFactory());
+        }
+    }
+
+    public T GetObject()
+    {
+        lock (objects)
+        {
+            if (objects.Count > 0)
+            {
+                return objects.Dequeue();
+            }
+        }
+
+        return objectFactory();
+    }
+
+    public void PutObject(T item)
+    {
+        lock (objects)
+        {
+            objects.Enqueue(item);
+        }
+    }
+}
 
 public static class JsonSerializerHelper
 {
+    private static readonly ObjectPool<JsonSerializer> SerializerPool =
+        new ObjectPool<JsonSerializer>(() => new JsonSerializer(), 10);
+
     public static string SerializeObject<T>(T obj)
     {
-        return JsonConvert.SerializeObject(obj);
+        using (var writer = new StringWriter())
+        using (var jsonWriter = new JsonTextWriter(writer))
+        {
+            var serializer = SerializerPool.GetObject();
+            serializer.Serialize(jsonWriter, obj);
+            SerializerPool.PutObject(serializer);
+
+            return writer.ToString();
+        }
     }
 
     public static T DeserializeObject<T>(string json)
     {
-        return JsonConvert.DeserializeObject<T>(json);
+        using (var reader = new StringReader(json))
+        using (var jsonReader = new JsonTextReader(reader))
+        {
+            var serializer = SerializerPool.GetObject();
+            var result = serializer.Deserialize<T>(jsonReader);
+            SerializerPool.PutObject(serializer);
+
+            return result;
+        }
     }
 
     public static List<ComputerHardware> DeserializeGatheredData(List<string> gatheredData)
@@ -66,6 +125,12 @@ class Program
     private const int MIN_PROCESSES = 2;
     private const int MAX_PROCESSES = 100;
     private static readonly TimeLogger timeLogger = new TimeLogger();
+
+    private static JsonSerializerSettings serializerSettings = new JsonSerializerSettings
+    {
+        TypeNameHandling = Newtonsoft.Json.TypeNameHandling.None,
+        MetadataPropertyHandling = Newtonsoft.Json.MetadataPropertyHandling.Ignore
+    };
 
     static void SaveToFile(ComputerHardware[] data, string fileName)
     {
@@ -165,7 +230,7 @@ class Program
             var serializedLocalData =
                 localData.Select(hardware => JsonSerializerHelper.SerializeObject(hardware)).ToList();
             timeLogger.StopTimer($"SerializedLocalData");
-            
+
             return serializedLocalData;
         }
     }
@@ -175,15 +240,14 @@ class Program
     {
         using (var dbContext = new SampleDbContext())
         {
-
             Console.WriteLine($"[MAIN REQUEST]: Main table request executing...");
+            timeLogger.StartTimer("MainTableRequest");
             var result = dbContext.ComputerHardwares.ToArray();
-
+            timeLogger.StopTimer("MainTableRequest");
 
             Console.WriteLine($"[MAIN REQUEST]: Main table consist of {result.Length} records");
 
             SaveToFile(result, "one_process_response.txt");
-            timeLogger.StopTimer("MainTableRequest");
         }
     }
 
@@ -193,11 +257,15 @@ class Program
 
         try
         {
+            timeLogger.StartTimer("SerializedDataToArray");
             string jsonArray = "[" + string.Join(",", gatheredData) + "]";
+            timeLogger.StopTimer("SerializedDataToArray");
 
             if (IsValidJson(jsonArray))
             {
+                timeLogger.StartTimer("DeserializeGatheredData");
                 deserializedData = JsonSerializerHelper.DeserializeObject<List<ComputerHardware>>(jsonArray);
+                timeLogger.StopTimer("DeserializeGatheredData");
             }
             else
             {
@@ -209,10 +277,14 @@ class Program
             Console.WriteLine($"Exception during deserialization: {ex.Message}");
         }
 
-        return deserializedData.ToArray();
+        timeLogger.StartTimer("DeserializedDataToArray");
+        var deserializedDataArray = deserializedData.ToArray();
+        timeLogger.StopTimer("DeserializedDataToArray");
+
+        return deserializedDataArray;
     }
 
-static void Main(string[] args)
+    static void Main(string[] args)
     {
         using (new MPI.Environment(ref args))
         {
@@ -228,19 +300,16 @@ static void Main(string[] args)
 
             int rank = Communicator.world.Rank;
             int numProcesses = Communicator.world.Size;
-            
+
             Communicator.world.Barrier();
             if (rank == 0)
             {
-                timeLogger.StartTimer("MainTableRequest");
                 ExecuteMainTableRequest();
-                timeLogger.StopTimer("MainTableRequest");
             }
 
             Communicator.world.Barrier();
             if (rank == 0)
             {
-                
                 timeLogger.StartTimer("DropAllTablesBeforeWork");
                 DropAllTables(rank);
                 timeLogger.StopTimer("DropAllTablesBeforeWork");
@@ -268,23 +337,24 @@ static void Main(string[] args)
             else
             {
                 var gatheredData = new string[numProcesses - 1];
-                
+
                 timeLogger.StartTimer("GatherData");
                 for (int i = 1; i < numProcesses; i++)
                 {
-                    
                     timeLogger.StartTimer("ReceiveData");
                     Console.WriteLine($"Process {rank}/{numProcesses} receiving data from process {i}/{numProcesses}");
                     gatheredData[i - 1] = Communicator.world.Receive<string>(i, 0);
                     Console.WriteLine($"Process {rank}/{numProcesses} received data from process {i}/{numProcesses}.");
                     timeLogger.StopTimer("ReceiveData");
                 }
+
                 timeLogger.StopTimer("GatherData");
 
-                timeLogger.StartTimer("DeserializeGatheredData");
+
+                timeLogger.StartTimer("DeserializeData");
                 var deserializedData = DeserializeData(gatheredData);
-                timeLogger.StopTimer("DeserializeGatheredData");
-                
+                timeLogger.StopTimer("DeserializeData");
+
                 SaveToFile(deserializedData, "multi_process_response.txt");
             }
 
@@ -307,19 +377,24 @@ static void Main(string[] args)
             Communicator.world.Barrier();
             if (rank == 0)
             {
-            
-                long totalTParallelRequestsTime = 
+                long totalTParallelRequestsTime =
                     // timeLogger.GetMaxElapsedTime("ReceiveData") +
-                                                  // timeLogger.GetMaxElapsedTime("GetLocalData") +
-                                                  // timeLogger.GetMaxElapsedTime("SerializeLocalData") +
+                    // timeLogger.GetMaxElapsedTime("GetLocalData") +
+                    // timeLogger.GetMaxElapsedTime("SerializeLocalData") +
                     timeLogger.GetLogTime("CreateTables") +
                     timeLogger.GetLogTime("GatherData") +
-                                                  timeLogger.GetLogTime("DropAllTablesBeforeWork") +
-                                                  timeLogger.GetLogTime("DeserializeGatheredData");
-            
+                    timeLogger.GetLogTime("DeserializeGatheredData") +
+                    timeLogger.GetLogTime("DropAllTablesBeforeWork") +
+                    timeLogger.GetLogTime("DropAllTablesAfterWork");
+                
+                Console.WriteLine($"DeserializeData: {timeLogger.GetLogTime("DeserializeData")}");
                 Console.WriteLine($"Non-parallel request: {timeLogger.GetLogTime("MainTableRequest")}");
-                Console.WriteLine($"Parallel requests : {totalTParallelRequestsTime}");
-
+                Console.WriteLine($"Parallel requests : {timeLogger.GetLogTime("CreateTables")}+" +
+                                  $"{timeLogger.GetLogTime("GatherData")}+" +
+                                  $"{timeLogger.GetLogTime("DeserializeGatheredData")}+" +
+                $"{timeLogger.GetLogTime("DropAllTablesBeforeWork")}+" +
+                                  $"{timeLogger.GetLogTime("DropAllTablesAfterWork")}=" +
+                                  $"{totalTParallelRequestsTime}");
             }
         }
     }
