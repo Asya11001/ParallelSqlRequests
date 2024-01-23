@@ -90,7 +90,7 @@ public static class JsonSerializerHelper
     }
 }
 
-
+[Serializable]
 [Table("computer_hardware")]
 public class ComputerHardware
 {
@@ -216,7 +216,7 @@ class Program
     }
 
 
-    static List<string> GetLocalData(int rank)
+    static ComputerHardware[] GetLocalData(int rank)
     {
         using (var dbContext = new SampleDbContext())
         {
@@ -226,12 +226,12 @@ class Program
                 .FromSqlRaw($"SELECT * FROM {tableName}");
             timeLogger.StopTimer($"GetLocalData");
 
-            timeLogger.StartTimer($"SerializedLocalData");
-            var serializedLocalData =
-                localData.Select(hardware => JsonSerializerHelper.SerializeObject(hardware)).ToList();
-            timeLogger.StopTimer($"SerializedLocalData");
+            // timeLogger.StartTimer($"SerializedLocalData");
+            // var serializedLocalData =
+                // localData.Select(hardware => JsonSerializerHelper.SerializeObject(hardware)).ToList();
+            // timeLogger.StopTimer($"SerializedLocalData");
 
-            return serializedLocalData;
+            return localData.ToArray();
         }
     }
 
@@ -304,7 +304,7 @@ class Program
             Communicator.world.Barrier();
             if (rank == 0)
             {
-                ExecuteMainTableRequest();
+                // ExecuteMainTableRequest();
             }
 
             Communicator.world.Barrier();
@@ -327,35 +327,38 @@ class Program
             if (rank != 0)
             {
                 var localData = GetLocalData(rank);
-                string serializedData = string.Join(",", localData);
-                Console.WriteLine($"Process {rank}/{numProcesses} sending data...");
+                // string serializedData = string.Join(",", localData);
+                // Console.WriteLine($"Process {rank}/{numProcesses} sending data...");
 
                 timeLogger.StartTimer($"SentData");
-                Communicator.world.Send(serializedData, 0, 0);
+                Communicator.world.Send<ComputerHardware[]>(localData, 0, 0);
                 timeLogger.StopTimer($"SentData");
             }
             else
             {
-                var gatheredData = new string[numProcesses - 1];
+                var gatheredData = new ComputerHardware[0];
 
                 timeLogger.StartTimer("GatherData");
                 for (int i = 1; i < numProcesses; i++)
                 {
                     timeLogger.StartTimer("ReceiveData");
                     Console.WriteLine($"Process {rank}/{numProcesses} receiving data from process {i}/{numProcesses}");
-                    gatheredData[i - 1] = Communicator.world.Receive<string>(i, 0);
+                    foreach (var computerHardware in Communicator.world.Receive<ComputerHardware[]>(i, 0))
+                    {
+                       gatheredData.Append(computerHardware);
+                    }
                     Console.WriteLine($"Process {rank}/{numProcesses} received data from process {i}/{numProcesses}.");
                     timeLogger.StopTimer("ReceiveData");
                 }
 
                 timeLogger.StopTimer("GatherData");
 
+                // Console.WriteLine(gatheredData.Length);
+                // timeLogger.StartTimer("DeserializeData");
+                // var deserializedData = DeserializeData(gatheredData);
+                // timeLogger.StopTimer("DeserializeData");
 
-                timeLogger.StartTimer("DeserializeData");
-                var deserializedData = DeserializeData(gatheredData);
-                timeLogger.StopTimer("DeserializeData");
-
-                SaveToFile(deserializedData, "multi_process_response.txt");
+                // SaveToFile(deserializedData, "multi_process_response.txt");
             }
 
             Communicator.world.Barrier();
